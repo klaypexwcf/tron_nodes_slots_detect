@@ -48,9 +48,14 @@ public class DbUtil {
             if(arrayList.isEmpty()) {
                 offset = 0;
                 Thread.sleep(10_000);
+                log.info("offset set to zero");
                 return getNewBatch(arrayList,conn);
             }
-            return arrayList;
+            else{
+                offset += arrayList.size();
+                log.info("offset set to {}",offset);
+                return arrayList;
+            }
         }catch (SQLException e) {
             e.printStackTrace();
             return arrayList;

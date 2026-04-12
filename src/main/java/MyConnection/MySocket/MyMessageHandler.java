@@ -88,7 +88,7 @@ public class MyMessageHandler extends ByteToMessageDecoder {
         }
         MyMessage message = MyMessage.parse(data);
 
-        System.out.println("receive msg from channel "+channel.getRemoteInetSocketAddress()+"type: "+message);
+        //System.out.println("receive msg from channel "+channel.getRemoteInetSocketAddress()+"type: "+message);
         switch (message.getType()) {
             case KEEP_ALIVE_PING:
                 log.info("received KEEP_ALIVE_PING from {}",channel.getRemoteInetSocketAddress());

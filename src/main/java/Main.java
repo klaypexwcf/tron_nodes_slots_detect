@@ -48,7 +48,9 @@ public class Main {
                     threadPool.execute(()->{
                         oneTask(ipPort);
                     });
+                    //ipList.remove(ipPort);
                 }
+                ipList.clear();
             }
         } catch (Exception e) {
             e.printStackTrace();

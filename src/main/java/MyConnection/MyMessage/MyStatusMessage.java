@@ -37,7 +37,7 @@ public class MyStatusMessage extends MyMessage {
             .setNetworkId(networkId)
             .setTimestamp(System.currentTimeMillis()).build();
     this.data = statusMessage.toByteArray();
-    System.out.println("new Status Msg with RemainConn:"+this.getRemainConnections());
+    //System.out.println("new Status Msg with RemainConn:"+this.getRemainConnections());
   }
 
   public int getNetworkId() {
