@@ -2,16 +2,15 @@ import MyConnection.*;
 import MyConnection.MySocket.MyPeerClient;
 import com.google.protobuf.ByteString;
 import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
 import org.apache.commons.cli.*;
 import org.tron.p2p.discover.Node;
 import org.tron.p2p.protos.Discover;
 import org.tron.p2p.utils.ByteArray;
 
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Paths;
 import java.sql.Connection;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
 
@@ -60,12 +59,9 @@ public class Main {
         }
     }
 
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) {
         AppConfig config = AppConfig.load(parseConfigPath(args));
-        DbUtil.init(config);
 
-        final Connection conn1 = DbUtil.getNewConnection();
-        final Connection conn2 = DbUtil.getNewConnection();
         final Node localNode = new Node(
                 MyUtil.generateRandomNodeId(),
                 config.getLocalHost(),
@@ -75,36 +71,49 @@ public class Main {
         );
         final Discover.Endpoint localEndpoint = getEndpointFromNode(localNode);
         final ExecutorService threadPool = buildThreadPool(config);
-        final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            scheduler.shutdownNow();
-            threadPool.shutdownNow();
-            closeQuietly(conn1);
-            closeQuietly(conn2);
-        }));
-
-        scheduler.scheduleAtFixedRate(
-                () -> batchInsert(conn2),
-                0,
-                config.getBatchInsertIntervalSeconds(),
-                TimeUnit.SECONDS
-        );
+        Runtime.getRuntime().addShutdownHook(new Thread(threadPool::shutdownNow));
 
         try {
-            List<TcpInfo> ipList = NodeFileReader.readPeers(Paths.get(config.getNodesFile()));
-            if (ipList.isEmpty()) {
-                System.err.println("nodes file is empty: " + config.getNodesFile());
-                return;
+            if (config.isFileMode()) {
+                runFileMode(config, localNode, localEndpoint, threadPool);
+            } else {
+                runDbMode(config, localNode, localEndpoint, threadPool);
             }
-            CountDownLatch latch = new CountDownLatch(ipList.size());
-            ResultWriter writer = new ResultWriter(Paths.get(config.getResultFile()));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("主线程被中断", e);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            threadPool.shutdownNow();
+        }
+    }
 
+    private static void runFileMode(
+            AppConfig config,
+            Node localNode,
+            Discover.Endpoint localEndpoint,
+            ExecutorService threadPool) throws Exception {
+
+        List<TcpInfo> ipList = NodeFileReader.readPeers(Paths.get(config.getNodesFile()));
+        if (ipList.isEmpty()) {
+            System.err.println("nodes file is empty: " + config.getNodesFile());
+            return;
+        }
+
+        try (ResultWriter writer = new ResultWriter(Paths.get(config.getResultFile()))) {
             writer.line("=== Connect Started ===");
+            writer.line("mode=file");
             writer.line("nodesFile=" + Paths.get(config.getNodesFile()).toAbsolutePath());
             writer.line("resultFile=" + Paths.get(config.getResultFile()).toAbsolutePath());
             writer.line("peerCount=" + ipList.size());
+            writer.line("threadPool=" + config.getThreadPoolCoreSize() + "/" + config.getThreadPoolMaxSize());
+            writer.line("connectTimeoutMillis=" + config.getConnectTimeoutMillis());
+            writer.line("successHoldMillis=" + config.getSuccessHoldMillis());
             writer.line("");
+
+            CountDownLatch latch = new CountDownLatch(ipList.size());
 
             for (TcpInfo ipPort : ipList) {
                 threadPool.execute(() -> {
@@ -120,15 +129,46 @@ public class Main {
 
             writer.line("");
             writer.line("=== Finished ===");
-            writer.close();
-            threadPool.shutdown();
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        } catch (Exception e) {
-            e.printStackTrace();
+        }
+    }
+
+    private static void runDbMode(
+            AppConfig config,
+            Node localNode,
+            Discover.Endpoint localEndpoint,
+            ExecutorService threadPool) {
+
+        DbUtil.init(config);
+
+        Connection conn1 = null;
+        Connection conn2 = null;
+        ScheduledExecutorService scheduler = null;
+
+        try {
+            conn1 = DbUtil.getNewConnection();
+            conn2 = DbUtil.getNewConnection();
+            scheduler = Executors.newScheduledThreadPool(1);
+
+            final Connection finalConn2 = conn2;
+            scheduler.scheduleAtFixedRate(
+                    () -> batchInsert(finalConn2),
+                    0,
+                    config.getBatchInsertIntervalSeconds(),
+                    TimeUnit.SECONDS
+            );
+
+            ArrayList<TcpInfo> ipList = new ArrayList<>();
+            while (!Thread.currentThread().isInterrupted()) {
+                DbUtil.getNewBatch(ipList, conn1);
+                for (TcpInfo ipPort : ipList) {
+                    threadPool.execute(() -> oneTask(ipPort, localNode, localEndpoint, null, config));
+                }
+                ipList.clear();
+            }
         } finally {
-            scheduler.shutdownNow();
-            threadPool.shutdownNow();
+            if (scheduler != null) {
+                scheduler.shutdownNow();
+            }
             closeQuietly(conn1);
             closeQuietly(conn2);
         }
@@ -145,11 +185,13 @@ public class Main {
         myPeerClient.init();
         Node remoteNode = new Node(new InetSocketAddress(ipPort.getIpv4(), ipPort.getPort()));
 
+        ChannelFuture future = null;
         long start = System.currentTimeMillis();
+
         try {
             int randomPort = MyUtil.getAvailablePort();
 
-            ChannelFuture future = myPeerClient.connectInDiscMode(
+            future = myPeerClient.connectInDiscMode(
                     remoteNode,
                     new Node(
                             MyUtil.generateRandomNodeId(),
@@ -162,34 +204,68 @@ public class Main {
                     getEndpointFromNode(remoteNode)
             );
 
-            future.addListener((ChannelFutureListener) f -> {
-                long cost = System.currentTimeMillis() - start;
-                if (f.isSuccess()) {
-                    writer.line("SUCCESS " + ipPort.getIpv4() + ":" + ipPort.getPort()
-                            + " costMs=" + cost);
-                } else {
-                    String msg = f.cause() == null ? "unknown" : f.cause().getMessage();
-                    writer.line("FAIL " + ipPort.getIpv4() + ":" + ipPort.getPort()
-                            + " costMs=" + cost
-                            + " reason=" + msg);
-                }
-            });
+            boolean completed = future.await(config.getConnectTimeoutMillis());
+            long cost = System.currentTimeMillis() - start;
 
-            future.await(config.getConnectTimeoutMillis());
-
-            if (!future.isDone()) {
-                writer.line("TIMEOUT " + ipPort.getIpv4() + ":" + ipPort.getPort()
+            if (!completed) {
+                writeResult(writer, "TIMEOUT " + ipPort.getIpv4() + ":" + ipPort.getPort()
                         + " timeoutMs=" + config.getConnectTimeoutMillis());
+                safeCloseChannel(future);
                 future.cancel(true);
-            } else if (future.channel() != null) {
-                future.channel().close().awaitUninterruptibly();
+                return;
             }
 
+            if (future.isSuccess()) {
+                writeResult(writer, "SUCCESS " + ipPort.getIpv4() + ":" + ipPort.getPort()
+                        + " costMs=" + cost);
+
+                if (config.getSuccessHoldMillis() > 0) {
+                    sleepQuietly(config.getSuccessHoldMillis());
+                }
+            } else {
+                Throwable cause = future.cause();
+                String msg = cause == null ? "unknown" : cause.getMessage();
+                writeResult(writer, "FAIL " + ipPort.getIpv4() + ":" + ipPort.getPort()
+                        + " costMs=" + cost
+                        + " reason=" + msg);
+            }
+
+            safeCloseChannel(future);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            writeResult(writer, "INTERRUPTED " + ipPort.getIpv4() + ":" + ipPort.getPort());
+            safeCloseChannel(future);
         } catch (Exception e) {
-            writer.line("ERROR " + ipPort.getIpv4() + ":" + ipPort.getPort()
+            writeResult(writer, "ERROR " + ipPort.getIpv4() + ":" + ipPort.getPort()
                     + " error=" + e.getMessage());
+            safeCloseChannel(future);
         } finally {
             myPeerClient.close();
+        }
+    }
+
+    private static void writeResult(ResultWriter writer, String line) {
+        if (writer != null) {
+            writer.line(line);
+        }
+    }
+
+    private static void safeCloseChannel(ChannelFuture future) {
+        if (future == null) {
+            return;
+        }
+        try {
+            if (future.channel() != null) {
+                future.channel().close().awaitUninterruptibly();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void sleepQuietly(long millis) throws InterruptedException {
+        if (millis > 0) {
+            Thread.sleep(millis);
         }
     }
 

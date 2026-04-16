@@ -1,5 +1,7 @@
 package MyConnection;
 
+import lombok.Getter;
+
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -8,7 +10,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Properties;
 
+@Getter
 public class AppConfig {
+
+    private final boolean fileMode;
 
     private final String localHost;
     private final int localPort;
@@ -25,11 +30,14 @@ public class AppConfig {
     private final String dbOnlineTableName;
     private final int dbBatchSize;
     private final long dbEmptyBatchSleepMillis;
+
     private final String nodesFile;
     private final String resultFile;
     private final int connectTimeoutMillis;
+    private final long successHoldMillis;
 
     private AppConfig(
+            boolean fileMode,
             String localHost,
             int localPort,
             int batchInsertIntervalSeconds,
@@ -42,10 +50,13 @@ public class AppConfig {
             String dbStatusTableName,
             String dbOnlineTableName,
             int dbBatchSize,
-            long dbEmptyBatchSleepMillis, String nodesFile, String resultFile, int connectTimeoutMillis) {
-        this.nodesFile = nodesFile;
-        this.resultFile = resultFile;
-        this.connectTimeoutMillis = connectTimeoutMillis;
+            long dbEmptyBatchSleepMillis,
+            String nodesFile,
+            String resultFile,
+            int connectTimeoutMillis,
+            long successHoldMillis) {
+
+        this.fileMode = fileMode;
 
         if (localHost == null || localHost.trim().isEmpty()) {
             throw new IllegalArgumentException("app.local.host 不能为空");
@@ -53,23 +64,39 @@ public class AppConfig {
         if (localPort <= 0 || localPort > 65535) {
             throw new IllegalArgumentException("app.local.port 非法");
         }
-        if (batchInsertIntervalSeconds <= 0) {
-            throw new IllegalArgumentException("app.batchInsertIntervalSeconds 必须大于 0");
-        }
         if (threadPoolCoreSize <= 0 || threadPoolMaxSize <= 0 || threadPoolMaxSize < threadPoolCoreSize) {
             throw new IllegalArgumentException("线程池参数非法");
         }
         if (threadPoolQueueCapacity <= 0) {
             throw new IllegalArgumentException("app.threadPool.queueCapacity 必须大于 0");
         }
-        if (dbUrl == null || dbUrl.trim().isEmpty()) {
-            throw new IllegalArgumentException("db.url 不能为空");
+        if (connectTimeoutMillis <= 0) {
+            throw new IllegalArgumentException("app.connectTimeoutMillis 必须大于 0");
         }
-        if (dbBatchSize <= 0) {
-            throw new IllegalArgumentException("db.batchSize 必须大于 0");
+        if (successHoldMillis < 0) {
+            throw new IllegalArgumentException("app.successHoldMillis 不能小于 0");
         }
-        if (dbEmptyBatchSleepMillis <= 0) {
-            throw new IllegalArgumentException("db.emptyBatchSleepMillis 必须大于 0");
+
+        if (fileMode) {
+            if (nodesFile == null || nodesFile.trim().isEmpty()) {
+                throw new IllegalArgumentException("app.input.nodesFile 不能为空");
+            }
+            if (resultFile == null || resultFile.trim().isEmpty()) {
+                throw new IllegalArgumentException("app.output.resultFile 不能为空");
+            }
+        } else {
+            if (batchInsertIntervalSeconds <= 0) {
+                throw new IllegalArgumentException("app.batchInsertIntervalSeconds 必须大于 0");
+            }
+            if (dbUrl == null || dbUrl.trim().isEmpty()) {
+                throw new IllegalArgumentException("db.url 不能为空");
+            }
+            if (dbBatchSize <= 0) {
+                throw new IllegalArgumentException("db.batchSize 必须大于 0");
+            }
+            if (dbEmptyBatchSleepMillis <= 0) {
+                throw new IllegalArgumentException("db.emptyBatchSleepMillis 必须大于 0");
+            }
         }
 
         this.localHost = localHost.trim();
@@ -78,13 +105,19 @@ public class AppConfig {
         this.threadPoolCoreSize = threadPoolCoreSize;
         this.threadPoolMaxSize = threadPoolMaxSize;
         this.threadPoolQueueCapacity = threadPoolQueueCapacity;
-        this.dbUrl = dbUrl.trim();
-        this.dbUser = dbUser;
-        this.dbPassword = dbPassword;
-        this.dbStatusTableName = dbStatusTableName;
-        this.dbOnlineTableName = dbOnlineTableName;
+
+        this.dbUrl = trimToEmpty(dbUrl);
+        this.dbUser = trimToEmpty(dbUser);
+        this.dbPassword = dbPassword == null ? "" : dbPassword;
+        this.dbStatusTableName = trimToEmpty(dbStatusTableName);
+        this.dbOnlineTableName = trimToEmpty(dbOnlineTableName);
         this.dbBatchSize = dbBatchSize;
         this.dbEmptyBatchSleepMillis = dbEmptyBatchSleepMillis;
+
+        this.nodesFile = trimToEmpty(nodesFile);
+        this.resultFile = trimToEmpty(resultFile);
+        this.connectTimeoutMillis = connectTimeoutMillis;
+        this.successHoldMillis = successHoldMillis;
     }
 
     public static AppConfig load(String configPath) {
@@ -102,23 +135,27 @@ public class AppConfig {
         }
 
         return new AppConfig(
+                getBoolean(p, "app.fileMode", true),
                 required(p, "app.local.host"),
                 getInt(p, "app.local.port", 30309),
                 getInt(p, "app.batchInsertIntervalSeconds", 15),
-                getInt(p, "app.threadPool.coreSize", 5),
-                getInt(p, "app.threadPool.maxSize", 5),
-                getInt(p, "app.threadPool.queueCapacity", 10),
-                required(p, "db.url"),
+                getInt(p, "app.threadPool.coreSize", 20),
+                getInt(p, "app.threadPool.maxSize", 50),
+                getInt(p, "app.threadPool.queueCapacity", 1000),
+
+                getString(p, "db.url", ""),
                 getString(p, "db.user", ""),
                 getString(p, "db.password", ""),
                 getString(p, "db.statusTableName", "status"),
                 getString(p, "db.onlineTableName", "public_online_nodes"),
                 getInt(p, "db.batchSize", 50),
                 getLong(p, "db.emptyBatchSleepMillis", 10000L),
-                getString(p,"app.input.nodesFile","nodes.txt"),
-                getString(p,"app.output.resultFile","connect_result.txt"),
-                getInt(p, "app.connectTimeoutMillis", 5000)
-                );
+
+                getString(p, "app.input.nodesFile", "nodes.txt"),
+                getString(p, "app.output.resultFile", "connect_result.txt"),
+                getInt(p, "app.connectTimeoutMillis", 5000),
+                getLong(p, "app.successHoldMillis", 0L)
+        );
     }
 
     private static String required(Properties p, String key) {
@@ -150,67 +187,20 @@ public class AppConfig {
         return Long.parseLong(value.trim());
     }
 
-    public String getLocalHost() {
-        return localHost;
+    private static boolean getBoolean(Properties p, String key, boolean defaultValue) {
+        String value = p.getProperty(key);
+        if (value == null || value.trim().isEmpty()) {
+            return defaultValue;
+        }
+        return Boolean.parseBoolean(value.trim());
     }
 
-    public int getLocalPort() {
-        return localPort;
+    private static String trimToEmpty(String s) {
+        return s == null ? "" : s.trim();
     }
 
-    public int getBatchInsertIntervalSeconds() {
-        return batchInsertIntervalSeconds;
+    public boolean isDbMode() {
+        return !fileMode;
     }
 
-    public int getThreadPoolCoreSize() {
-        return threadPoolCoreSize;
-    }
-
-    public int getThreadPoolMaxSize() {
-        return threadPoolMaxSize;
-    }
-
-    public int getThreadPoolQueueCapacity() {
-        return threadPoolQueueCapacity;
-    }
-
-    public String getDbUrl() {
-        return dbUrl;
-    }
-
-    public String getDbUser() {
-        return dbUser;
-    }
-
-    public String getDbPassword() {
-        return dbPassword;
-    }
-
-    public String getDbStatusTableName() {
-        return dbStatusTableName;
-    }
-
-    public String getDbOnlineTableName() {
-        return dbOnlineTableName;
-    }
-
-    public int getDbBatchSize() {
-        return dbBatchSize;
-    }
-
-    public long getDbEmptyBatchSleepMillis() {
-        return dbEmptyBatchSleepMillis;
-    }
-
-    public String getNodesFile() {
-        return nodesFile;
-    }
-
-    public String getResultFile() {
-        return resultFile;
-    }
-
-    public int getConnectTimeoutMillis() {
-        return connectTimeoutMillis;
-    }
 }
