@@ -25,6 +25,9 @@ public class AppConfig {
     private final String dbOnlineTableName;
     private final int dbBatchSize;
     private final long dbEmptyBatchSleepMillis;
+    private final String nodesFile;
+    private final String resultFile;
+    private final int connectTimeoutMillis;
 
     private AppConfig(
             String localHost,
@@ -39,7 +42,10 @@ public class AppConfig {
             String dbStatusTableName,
             String dbOnlineTableName,
             int dbBatchSize,
-            long dbEmptyBatchSleepMillis) {
+            long dbEmptyBatchSleepMillis, String nodesFile, String resultFile, int connectTimeoutMillis) {
+        this.nodesFile = nodesFile;
+        this.resultFile = resultFile;
+        this.connectTimeoutMillis = connectTimeoutMillis;
 
         if (localHost == null || localHost.trim().isEmpty()) {
             throw new IllegalArgumentException("app.local.host 不能为空");
@@ -108,8 +114,11 @@ public class AppConfig {
                 getString(p, "db.statusTableName", "status"),
                 getString(p, "db.onlineTableName", "public_online_nodes"),
                 getInt(p, "db.batchSize", 50),
-                getLong(p, "db.emptyBatchSleepMillis", 10000L)
-        );
+                getLong(p, "db.emptyBatchSleepMillis", 10000L),
+                getString(p,"app.input.nodesFile","nodes.txt"),
+                getString(p,"app.output.resultFile","connect_result.txt"),
+                getInt(p, "app.connectTimeoutMillis", 5000)
+                );
     }
 
     private static String required(Properties p, String key) {
@@ -191,5 +200,17 @@ public class AppConfig {
 
     public long getDbEmptyBatchSleepMillis() {
         return dbEmptyBatchSleepMillis;
+    }
+
+    public String getNodesFile() {
+        return nodesFile;
+    }
+
+    public String getResultFile() {
+        return resultFile;
+    }
+
+    public int getConnectTimeoutMillis() {
+        return connectTimeoutMillis;
     }
 }

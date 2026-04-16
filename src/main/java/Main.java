@@ -1,31 +1,19 @@
-import MyConnection.AppConfig;
-import MyConnection.DbUtil;
+import MyConnection.*;
 import MyConnection.MySocket.MyPeerClient;
-import MyConnection.MyUtil;
-import MyConnection.TcpInfo;
 import com.google.protobuf.ByteString;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.DefaultParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
+import org.apache.commons.cli.*;
 import org.tron.p2p.discover.Node;
 import org.tron.p2p.protos.Discover;
 import org.tron.p2p.utils.ByteArray;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Paths;
 import java.sql.Connection;
-import java.util.ArrayList;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.List;
+import java.util.concurrent.*;
 
 public class Main {
 
@@ -72,7 +60,7 @@ public class Main {
         }
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws IOException {
         AppConfig config = AppConfig.load(parseConfigPath(args));
         DbUtil.init(config);
 
@@ -103,15 +91,39 @@ public class Main {
                 TimeUnit.SECONDS
         );
 
-        ArrayList<TcpInfo> ipList = new ArrayList<>();
         try {
-            while (!Thread.currentThread().isInterrupted()) {
-                DbUtil.getNewBatch(ipList, conn1);
-                for (TcpInfo ipPort : ipList) {
-                    threadPool.execute(() -> oneTask(ipPort, localNode, localEndpoint));
-                }
-                ipList.clear();
+            List<TcpInfo> ipList = NodeFileReader.readPeers(Paths.get(config.getNodesFile()));
+            if (ipList.isEmpty()) {
+                System.err.println("nodes file is empty: " + config.getNodesFile());
+                return;
             }
+            CountDownLatch latch = new CountDownLatch(ipList.size());
+            ResultWriter writer = new ResultWriter(Paths.get(config.getResultFile()));
+
+            writer.line("=== Connect Started ===");
+            writer.line("nodesFile=" + Paths.get(config.getNodesFile()).toAbsolutePath());
+            writer.line("resultFile=" + Paths.get(config.getResultFile()).toAbsolutePath());
+            writer.line("peerCount=" + ipList.size());
+            writer.line("");
+
+            for (TcpInfo ipPort : ipList) {
+                threadPool.execute(() -> {
+                    try {
+                        oneTask(ipPort, localNode, localEndpoint, writer, config);
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+            }
+
+            latch.await();
+
+            writer.line("");
+            writer.line("=== Finished ===");
+            writer.close();
+            threadPool.shutdown();
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
@@ -125,14 +137,18 @@ public class Main {
     private static void oneTask(
             TcpInfo ipPort,
             Node localNode,
-            Discover.Endpoint localEndpoint) {
+            Discover.Endpoint localEndpoint,
+            ResultWriter writer,
+            AppConfig config) {
 
         MyPeerClient myPeerClient = new MyPeerClient();
         myPeerClient.init();
         Node remoteNode = new Node(new InetSocketAddress(ipPort.getIpv4(), ipPort.getPort()));
 
+        long start = System.currentTimeMillis();
         try {
             int randomPort = MyUtil.getAvailablePort();
+
             ChannelFuture future = myPeerClient.connectInDiscMode(
                     remoteNode,
                     new Node(
@@ -147,18 +163,31 @@ public class Main {
             );
 
             future.addListener((ChannelFutureListener) f -> {
+                long cost = System.currentTimeMillis() - start;
                 if (f.isSuccess()) {
-                    f.channel().closeFuture().addListener(cf ->
-                            System.out.println("连接已关闭: " + f.channel().remoteAddress().toString())
-                    );
+                    writer.line("SUCCESS " + ipPort.getIpv4() + ":" + ipPort.getPort()
+                            + " costMs=" + cost);
                 } else {
-                    System.out.println("连接失败: " + f.cause().getMessage());
+                    String msg = f.cause() == null ? "unknown" : f.cause().getMessage();
+                    writer.line("FAIL " + ipPort.getIpv4() + ":" + ipPort.getPort()
+                            + " costMs=" + cost
+                            + " reason=" + msg);
                 }
             });
 
-            future.channel().closeFuture().sync();
+            future.await(config.getConnectTimeoutMillis());
+
+            if (!future.isDone()) {
+                writer.line("TIMEOUT " + ipPort.getIpv4() + ":" + ipPort.getPort()
+                        + " timeoutMs=" + config.getConnectTimeoutMillis());
+                future.cancel(true);
+            } else if (future.channel() != null) {
+                future.channel().close().awaitUninterruptibly();
+            }
+
         } catch (Exception e) {
-            e.printStackTrace();
+            writer.line("ERROR " + ipPort.getIpv4() + ":" + ipPort.getPort()
+                    + " error=" + e.getMessage());
         } finally {
             myPeerClient.close();
         }
