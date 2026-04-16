@@ -96,11 +96,17 @@ public class Main {
             Discover.Endpoint localEndpoint,
             ExecutorService threadPool) throws Exception {
 
+        // 文件模式下虽然不连数据库，但如果你的 DbUtil 其他地方需要 config，
+        // 这里初始化一下是安全的，不会创建数据库连接。
+        DbUtil.init(config);
+
         List<TcpInfo> ipList = NodeFileReader.readPeers(Paths.get(config.getNodesFile()));
         if (ipList.isEmpty()) {
             System.err.println("nodes file is empty: " + config.getNodesFile());
             return;
         }
+
+        ScheduledExecutorService statusScheduler = Executors.newScheduledThreadPool(1);
 
         try (ResultWriter writer = new ResultWriter(Paths.get(config.getResultFile()))) {
             writer.line("=== Connect Started ===");
@@ -112,6 +118,20 @@ public class Main {
             writer.line("connectTimeoutMillis=" + config.getConnectTimeoutMillis());
             writer.line("successHoldMillis=" + config.getSuccessHoldMillis());
             writer.line("");
+
+            // 定期把 StatusInfo 队列里的内容刷到输出文件
+            statusScheduler.scheduleAtFixedRate(
+                    () -> {
+                        try {
+                            DbUtil.batchWriteToFile(writer);
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                        }
+                    },
+                    1,
+                    1,
+                    TimeUnit.SECONDS
+            );
 
             CountDownLatch latch = new CountDownLatch(ipList.size());
 
@@ -127,8 +147,13 @@ public class Main {
 
             latch.await();
 
+            // 所有连接任务结束后，再额外 flush 一次，避免最后一批状态没写出来
+            DbUtil.batchWriteToFile(writer);
+
             writer.line("");
             writer.line("=== Finished ===");
+        } finally {
+            statusScheduler.shutdownNow();
         }
     }
 

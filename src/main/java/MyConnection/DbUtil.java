@@ -119,6 +119,31 @@ public class DbUtil {
         }
     }
 
+    public static void batchWriteToFile(ResultWriter writer) {
+        int count = 0;
+
+        while (!messageQueue.isEmpty()) {
+            StatusInfo statusInfo = messageQueue.poll();
+            if (statusInfo == null) {
+                continue;
+            }
+
+            int maxConn = statusInfo.getMaxConn();
+            int currentConn = statusInfo.getCurrentConn();
+            int freeSlots = Math.max(0, maxConn - currentConn);
+
+            writer.line(
+                    "STATUS"
+                            + " ipv4=" + statusInfo.getIpv4()
+                            + " maxConn=" + maxConn
+                            + " currentConn=" + currentConn
+                            + " freeSlots=" + freeSlots
+            );
+            count++;
+        }
+
+        log.info("write {} status infos to file", count);
+    }
     public static void addNewStatus(StatusInfo statusInfo) {
         messageQueue.offer(statusInfo);
     }
